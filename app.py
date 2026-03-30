@@ -89,18 +89,33 @@ def analizza_pdf(pdf_file):
 uploaded_files = st.file_uploader("Scegli i file PDF", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for uploaded_file in uploaded_files:
+    # Lista per memorizzare i dati estratti con successo
+    fogli_da_salvare = []
+
+    for uploaded_file in uploaded_files:
+        with st.spinner(f"Analisi di {uploaded_file.name}..."):
             df_mese = analizza_pdf(uploaded_file)
             if not df_mese.empty:
-                df_mese.to_excel(writer, sheet_name=uploaded_file.name[:31], index=False)
-                st.subheader(f"Anteprima: {uploaded_file.name}")
-                st.dataframe(df_mese)
-    
-    st.download_button(
-        label="📥 Scarica Report Excel",
-        data=output.getvalue(),
-        file_name="Report_Ore_Lavoro.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+                fogli_da_salvare.append((uploaded_file.name[:31], df_mese))
+            else:
+                st.warning(f"⚠️ Non ho trovato dati validi nel file: {uploaded_file.name}. Controlla che il PDF sia nel formato corretto.")
+
+    # Se abbiamo trovato almeno un foglio con dei dati, creiamo l'Excel
+    if fogli_da_salvare:
+        output = io.BytesIO()
+        # Apriamo ExcelWriter solo se abbiamo effettivamente qualcosa da scriverci
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            for nome_foglio, df in fogli_da_salvare:
+                df.to_excel(writer, sheet_name=nome_foglio, index=False)
+                st.subheader(f"✅ Anteprima: {nome_foglio}")
+                st.dataframe(df)
+        
+        st.success("Analisi completata!")
+        st.download_button(
+            label="📥 Scarica Report Excel",
+            data=output.getvalue(),
+            file_name="Report_Ore_Lavoro.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.error("❌ Errore: Nessun dato estratto dai PDF caricati. L'Excel non può essere generato.")
