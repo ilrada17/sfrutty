@@ -38,7 +38,7 @@ def formatta_hhmm(ore_decimali):
     minuti = int(round((ore_decimali - ore) * 60))
     return f"{ore:02d}:{minuti:02d}"
 
-def analizza_pdf_perseo(pdf_file):
+def analizza_pdf(pdf_file):
     ore_standard_base = {0: 8.0, 1: 8.0, 2: 8.0, 3: 8.0, 4: 4.0, 5: 0.0, 6: 0.0}
     nomi_giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
     
