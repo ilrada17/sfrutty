@@ -5,48 +5,27 @@ import pandas as pd
 import io
 from datetime import datetime, timedelta
 
-# Configurazione Pagina
-st.set_page_config(page_title="Calcolatore Ore Lavoro", layout="wide")
-st.title("📊 Calcolatore Ore e Straordinari")
-st.write("Versione ottimizzata per turni multipli e giorni su più righe.")
+st.set_page_config(page_title="Calcolatore Perseo3", layout="wide")
+st.title("📊 Estrattore Ore Perseo3 Aeronautica")
 
 def converti_in_timedelta(ora_str):
-    if ora_str == "24:00": return timedelta(hours=24)
+    if not ora_str or ":" not in ora_str: return timedelta(0)
     try:
         ore, minuti = map(int, ora_str.split(':'))
         return timedelta(hours=ore, minutes=minuti)
     except: return timedelta(0)
 
-def ricava_giorno_settimana(data_str):
-    data_str = data_str.lower()
-    if 'lun' in data_str: return 0
-    if 'mar' in data_str: return 1
-    if 'mer' in data_str: return 2
-    if 'gio' in data_str or 'gia' in data_str: return 3
-    if 'ven' in data_str: return 4
-    if 'sab' in data_str or 'sah' in data_str: return 5
-    if 'dom' in data_str: return 6
-    match = re.search(r'(\d{2}/\d{2}/\d{4})', data_str)
-    if match:
-        try: return datetime.strptime(match.group(1), "%d/%m/%Y").weekday()
-        except: return None
-    return None
-
 def formatta_hhmm(ore_decimali):
-    """Formatta ore decimali in HH:MM (anche oltre le 24 ore)"""
     ore = int(ore_decimali)
     minuti = int(round((ore_decimali - ore) * 60))
     return f"{ore:02d}:{minuti:02d}"
 
-def analizza_pdf(pdf_file):
+def analizza_pdf_perseo(pdf_file):
+    # Standard: Lun-Gio 8h, Ven 4h
     ore_standard_base = {0: 8.0, 1: 8.0, 2: 8.0, 3: 8.0, 4: 4.0, 5: 0.0, 6: 0.0}
     nomi_giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
-    limite_inizio_cont = converti_in_timedelta("14:00")
-    limite_fine_cont = converti_in_timedelta("15:30")
     
     dati_righe = []
-    
-    # VARIABILI DI STATO: mantengono la data tra una riga e l'altra
     giorno_corrente = None
     giorno_sett_idx = None
 
@@ -55,33 +34,46 @@ def analizza_pdf(pdf_file):
             testo = pagina.extract_text()
             if not testo: continue
             
-            for linea in testo.split('\n'):
-                # 1. Cerchiamo se la riga contiene una NUOVA data
-                match_data = re.search(r'(\d{2}\s+[A-Za-z]{3}|\d{2}/\d{2}/\d{4})', linea)
+            # Pulizia: rimuoviamo i ritorni a capo eccessivi che spezzano le righe
+            linee = testo.replace('\n\n', '\n').split('\n')
+            
+            for linea in linee:
+                # 1. IDENTIFICAZIONE DATA (es. 01 Mer o 01/01/2026)
+                match_data = re.search(r'(\d{2}\s+(?:Lun|Mar|Mer|Gio|Gia|Ven|Sab|Sah|Dom)|(\d{2}/\d{2}/\d{4}))', linea, re.IGNORECASE)
+                
                 if match_data:
                     giorno_corrente = match_data.group(1).strip()
-                    giorno_sett_idx = ricava_giorno_settimana(giorno_corrente)
+                    # Mapping manuale per Perseo (gestisce anche "Gia" o "Sah")
+                    low_g = giorno_corrente.lower()
+                    if 'lun' in low_g: giorno_sett_idx = 0
+                    elif 'mar' in low_g: giorno_sett_idx = 1
+                    elif 'mer' in low_g: giorno_sett_idx = 2
+                    elif 'gio' in low_g or 'gia' in low_g: giorno_sett_idx = 3
+                    elif 'ven' in low_g: giorno_sett_idx = 4
+                    elif 'sab' in low_g or 'sah' in low_g: giorno_sett_idx = 5
+                    elif 'dom' in low_g: giorno_sett_idx = 6
+                    else:
+                        try: # Prova formato data estesa
+                            giorno_sett_idx = datetime.strptime(re.search(r'\d{2}/\d{2}/\d{4}', giorno_corrente).group(), "%d/%m/%Y").weekday()
+                        except: pass
 
-                # Se non abbiamo ancora trovato nessuna data, saltiamo la riga
-                if giorno_sett_idx is None:
-                    continue
+                if giorno_sett_idx is None: continue
 
-                # 2. Cerchiamo TUTTI gli orari nella riga (possono essere più di 2)
+                # 2. ESTRAZIONE ORARI (cerca tutti i pattern HH:MM)
                 orari = re.findall(r'\b\d{2}:\d{2}\b', linea)
                 
-                # Elaboriamo le coppie di orari (Inizio/Fine)
+                # Se la riga ha orari (es. 08:00 16:30)
                 for i in range(0, len(orari) // 2 * 2, 2):
                     ora_in, ora_fi = orari[i], orari[i+1]
-                    
-                    if ora_in == "00:00" and ora_fi == "00:00":
-                        continue
-                    
+                    if ora_in == "00:00" and ora_fi == "00:00": continue
+
                     t_in = converti_in_timedelta(ora_in)
                     t_fi = converti_in_timedelta(ora_fi)
-                    t_fi_effettiva = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
+                    t_fi_eff = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
                     
-                    durata_ore = (t_fi_effettiva - t_in).total_seconds() / 3600
-                    is_continuato = (t_in <= limite_inizio_cont) and (t_fi_effettiva >= limite_fine_cont)
+                    durata = (t_fi_eff - t_in).total_seconds() / 3600
+                    # Continuato se copre 14:00-15:30
+                    is_cont = (t_in <= timedelta(hours=14)) and (t_fi_eff >= timedelta(hours=15, minutes=30))
 
                     dati_righe.append({
                         "Data": giorno_corrente,
@@ -89,80 +81,63 @@ def analizza_pdf(pdf_file):
                         "Giorno_Idx": giorno_sett_idx,
                         "Inizio": ora_in,
                         "Fine": ora_fi,
-                        "Ore_Fatte": durata_ore,
-                        "Is_Cont": is_continuato
+                        "Ore_Fatte": durata,
+                        "Is_Cont": is_cont
                     })
-    
+
     if not dati_righe: return pd.DataFrame(), 0, 0
-    
+
     df = pd.DataFrame(dati_righe)
+    # Aggregazione giornaliera
+    df_daily = df.groupby('Data').agg({'Ore_Fatte':'sum', 'Giorno_Idx':'first', 'Is_Cont':'any'}).reset_index()
     
-    # Raggruppamento per Data per calcolare il totale del giorno (somma i turni multipli)
-    df_daily = df.groupby('Data').agg({
-        'Ore_Fatte': 'sum',
-        'Giorno_Idx': 'first',
-        'Is_Cont': 'any'
-    }).reset_index()
+    def calcola_std(r):
+        b = ore_standard_base[r['Giorno_Idx']]
+        return b + 0.5 if (r['Giorno_Idx'] <= 3 and r['Is_Cont']) else b
+
+    df_daily['Std'] = df_daily.apply(calcola_std, axis=1)
+    df_daily['Straord'] = (df_daily['Ore_Fatte'] - df_daily['Std']).clip(lower=0)
+
+    # Merge finale
+    df_fin = df.merge(df_daily[['Data', 'Std', 'Straord', 'Is_Cont']], on='Data')
     
-    df_daily = df_daily.rename(columns={'Ore_Fatte': 'Ore_Tot_Giorno', 'Is_Cont': 'Giorno_Continuato'})
+    tot_ore = df_daily['Ore_Fatte'].sum()
+    tot_st = df_daily['Straord'].sum()
 
-    def calcola_standard(row):
-        base = ore_standard_base[row['Giorno_Idx']]
-        if row['Giorno_Idx'] <= 3 and row['Giorno_Continuato']: return base + 0.5
-        return base
+    # Formattazione colonne
+    df_fin['Durata Turno'] = df_fin['Ore_Fatte'].apply(formatta_hhmm)
+    df_fin['Straord. Giorno'] = df_fin['Straord'].apply(formatta_hhmm)
+    df_fin['Standard Rif.'] = df_fin['Std'].apply(formatta_hhmm)
+    df_fin['Orario Continuato'] = df_fin['Is_Cont'].map({True:'SI', False:'NO'})
 
-    df_daily['Standard_Applicato'] = df_daily.apply(calcola_standard, axis=1)
-    df_daily['Straordinario_Dec'] = (df_daily['Ore_Tot_Giorno'] - df_daily['Standard_Applicato']).clip(lower=0)
+    return df_fin[['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Orario Continuato', 'Standard Rif.', 'Straord. Giorno']], tot_ore, tot_st
+
+# --- UI ---
+files = st.file_uploader("Carica PDF Perseo3", type="pdf", accept_multiple_files=True)
+
+if files:
+    all_ore, all_st = 0, 0
+    fogli = []
     
-    df_output = df.merge(df_daily[['Data', 'Standard_Applicato', 'Straordinario_Dec', 'Giorno_Continuato']], on='Data', how='left')
-    
-    # Totali complessivi per il file
-    tot_ore_file = df_daily['Ore_Tot_Giorno'].sum()
-    tot_straord_file = df_daily['Straordinario_Dec'].sum()
+    for f in files:
+        df, ore, st_ore = analizza_pdf_perseo(f)
+        if not df.empty:
+            fogli.append((f.name[:30], df))
+            all_ore += ore
+            all_st += st_ore
+        else:
+            st.error(f"Impossibile leggere i dati da: {f.name}")
 
-    df_output['Durata Turno'] = df_output['Ore_Fatte'].apply(formatta_hhmm)
-    df_output['Straord. Giorno'] = df_output['Straordinario_Dec'].apply(formatta_hhmm)
-    df_output['Standard Rif.'] = df_output['Standard_Applicato'].apply(formatta_hhmm)
-    df_output['Orario Continuato'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
-    
-    colonne_finali = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Orario Continuato', 'Standard Rif.', 'Straord. Giorno']
-    return df_output[colonne_finali], tot_ore_file, tot_straord_file
-
-# --- INTERFACCIA STREAMLIT ---
-uploaded_files = st.file_uploader("Carica i PDF Perseo3", type="pdf", accept_multiple_files=True)
-
-if uploaded_files:
-    fogli_da_salvare = []
-    totale_generale_ore = 0
-    totale_generale_straord = 0
-
-    for uploaded_file in uploaded_files:
-        df_mese, ore_file, straord_file = analizza_pdf(uploaded_file)
-        if not df_mese.empty:
-            fogli_da_salvare.append((uploaded_file.name[:31], df_mese))
-            totale_generale_ore += ore_file
-            totale_generale_straord += straord_file
-
-    if fogli_da_salvare:
-        st.divider()
-        st.subheader("📈 Riepilogo Complessivo")
+    if fogli:
+        st.success("Analisi completata!")
         c1, c2 = st.columns(2)
-        c1.metric("Totale Ore Lavorate", formatta_hhmm(totale_generale_ore))
-        c2.metric("Totale Straordinario", formatta_hhmm(totale_generale_straord))
-        st.divider()
+        c1.metric("TOTALE ORE", formatta_hhmm(all_ore))
+        c2.metric("TOTALE STRAORDINARIO", formatta_hhmm(all_st))
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for nome_foglio, df in fogli_da_salvare:
-                df.to_excel(writer, sheet_name=nome_foglio, index=False)
-                with st.expander(f"Anteprima: {nome_foglio}"):
-                    st.dataframe(df)
-            
-            # Foglio di riepilogo
-            df_riepilogo = pd.DataFrame({
-                "Descrizione": ["Totale Ore Lavorate", "Totale Ore Straordinario"],
-                "Valore (HH:MM)": [formatta_hhmm(totale_generale_ore), formatta_hhmm(totale_generale_straord)]
-            })
-            df_riepilogo.to_excel(writer, sheet_name="RIEPILOGO_FINALE", index=False)
-
-        st.download_button("📥 Scarica Report Excel", output.getvalue(), "Report_Ore_Lavoro.xlsx")
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine='openpyxl') as writer:
+            for nome, d in fogli:
+                d.to_excel(writer, sheet_name=nome, index=False)
+            pd.DataFrame({"Totale Ore":[formatta_hhmm(all_ore)], "Totale Straord":[formatta_hhmm(all_st)]}).to_excel(writer, sheet_name="RIEPILOGO")
+        
+        st.download_button("📥 Scarica Report Excel", out.getvalue(), "Report.xlsx")
