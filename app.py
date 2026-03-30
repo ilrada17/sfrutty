@@ -42,17 +42,15 @@ def formatta_hhmm(ore_decimali):
     return f"{ore:02d}:{minuti:02d}"
 
 def analizza_pdf(pdf_file):
-    # Standard: Lun-Gio 8.0h, Ven 4.0h
+    # Standard: Lun-Gio 8.0h, Ven 4.0h [Basato su orari standard PA/AM]
     ore_standard_base = {0: 8.0, 1: 8.0, 2: 8.0, 3: 8.0, 4: 4.0, 5: 0.0, 6: 0.0}
     nomi_giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
     
-    # Parametri per il servizio continuato (mensa)
+    # Parametri per il servizio continuato (diritto al pasto)
     limite_inizio_cont = converti_in_timedelta("14:00")
     limite_fine_cont = converti_in_timedelta("15:30")
     
     dati_righe = []
-    
-    # VARIABILI DI MEMORIA (Persistono tra le righe)
     giorno_corrente = None
     giorno_sett_idx = None
 
@@ -62,47 +60,77 @@ def analizza_pdf(pdf_file):
             if not testo: continue
             
             for linea in testo.split('\n'):
-                # 1. Tenta di rilevare una NUOVA data (es. "04 Mer" o "04/02/2026")
-                match_data = re.search(r'^(\d{2}\s+[A-Za-z]{3}|\d{2}/\d{2}/\d{4})', linea)
-                
+                # 1. Rileva data (es. "02 Lun", "04 Mer") 
+                match_data = re.search(r'^(\d{2}\s+[A-Za-z]{3})', linea)
                 if match_data:
                     giorno_corrente = match_data.group(1).strip()
                     giorno_sett_idx = ricava_giorno_settimana(giorno_corrente)
 
-                # Se non abbiamo ancora trovato la prima data utile del file, salta
-                if giorno_corrente is None or giorno_sett_idx is None:
-                    continue
+                if giorno_corrente is None: continue
 
-                # 2. Trova tutti gli orari HH:MM nella riga
+                # 2. Estrae orari HH:MM 
                 orari = re.findall(r'\b\d{2}:\d{2}\b', linea)
                 
-                # Elabora le coppie Inizio/Fine (anche più coppie per riga se presenti)
                 for i in range(0, len(orari) // 2 * 2, 2):
                     ora_in, ora_fi = orari[i], orari[i+1]
                     
-                    # Salta righe di "Fuori Servizio" con 00:00-00:00
-                    if ora_in == "00:00" and ora_fi == "00:00":
-                        continue
+                    # Ignora i "Fuori Servizio" 00:00-00:00 
+                    if ora_in == "00:00" and ora_fi == "00:00": continue
                     
                     t_in = converti_in_timedelta(ora_in)
                     t_fi = converti_in_timedelta(ora_fi)
+                    t_fi_eff = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
                     
-                    # Gestione turno notturno che scavalca la mezzanotte
-                    t_fi_effettiva = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
-                    durata_ore = (t_fi_effettiva - t_in).total_seconds() / 3600
-                    
-                    # Verifica se questo specifico segmento copre la pausa pranzo
-                    segmento_continuato = (t_in <= limite_inizio_cont) and (t_fi_effettiva >= limite_fine_cont)
+                    durata = (t_fi_eff - t_in).total_seconds() / 3600
 
                     dati_righe.append({
-                        "Data_Originale": giorno_corrente,
+                        "Data": giorno_corrente,
                         "Giorno": nomi_giorni[giorno_sett_idx],
                         "Giorno_Idx": giorno_sett_idx,
                         "Inizio": ora_in,
                         "Fine": ora_fi,
-                        "Ore_Fatte": durata_ore,
-                        "Segmento_Cont": segmento_continuato
+                        "Ore_Fatte": durata,
+                        "Copre_Mensa": (t_in <= limite_inizio_cont and t_fi_eff >= limite_fine_cont)
                     })
+    
+    if not dati_righe: return pd.DataFrame(), 0, 0
+    
+    df_raw = pd.DataFrame(dati_righe)
+    
+    # 3. Aggregazione Giornaliera
+    df_daily = df_raw.groupby('Data').agg({
+        'Ore_Fatte': 'sum',
+        'Giorno_Idx': 'first',
+        'Copre_Mensa': 'any'
+    }).reset_index()
+
+    # Calcolo Standard e Straordinario
+    def calcola_std(row):
+        std = ore_standard_base[row['Giorno_Idx']]
+        # Se copre la fascia mensa (Lun-Gio), lo standard sale di 30 min per recupero pausa
+        return (std + 0.5) if (row['Giorno_Idx'] <= 3 and row['Copre_Mensa']) else std
+
+    df_daily['Standard_Rif'] = df_daily.apply(calcola_std, axis=1)
+    df_daily['Straord_Dec'] = (df_daily['Ore_Fatte'] - df_daily['Standard_Rif']).clip(lower=0)
+    
+    # 4. Merge correttivo (Rinominiamo le colonne per evitare il KeyError)
+    df_daily = df_daily.rename(columns={'Copre_Mensa': 'Giorno_Continuato', 'Ore_Fatte': 'Totale_Giorno'})
+    
+    df_output = df_raw.merge(
+        df_daily[['Data', 'Standard_Rif', 'Straord_Dec', 'Giorno_Continuato', 'Totale_Giorno']], 
+        on='Data', 
+        how='left'
+    )
+    
+    # 5. Formattazione Finale
+    df_output['Durata Turno'] = df_output['Ore_Fatte'].apply(formatta_hhmm)
+    df_output['Totale Giorno'] = df_output['Totale_Giorno'].apply(formatta_hhmm)
+    df_output['Straord. Giorno'] = df_output['Straord_Dec'].apply(formatta_hhmm)
+    df_output['Standard Rif.'] = df_output['Standard_Rif'].apply(formatta_hhmm)
+    df_output['Diritto Pasto'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
+    
+    colonne = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Totale Giorno', 'Standard Rif.', 'Diritto Pasto', 'Straord. Giorno']
+    return df_output[colonne], df_daily['Totale_Giorno'].sum(), df_daily['Straord_Dec'].sum()
     
     if not dati_righe: return pd.DataFrame(), 0, 0
     
