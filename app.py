@@ -101,7 +101,7 @@ def analizza_pdf(pdf_file):
     df_output['Standard Rif.'] = df_output['Standard_Applicato'].apply(formatta_hhmm)
     df_output['Orario Continuato'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
     
-    colonne_finali = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Orario Continuato', 'Standard Rif.', 'Straord. Giorno']
+    colonne_finali = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Diritto al Pasto', 'Standard Rif.', 'Straord. Giorno']
     return df_output[colonne_finali], tot_ore_file, tot_straord_file
 
 # --- INTERFACCIA STREAMLIT ---
