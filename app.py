@@ -99,7 +99,7 @@ def analizza_pdf(pdf_file):
     df_output['Durata Turno'] = df_output['Ore_Fatte'].apply(formatta_hhmm)
     df_output['Straord. Giorno'] = df_output['Straordinario_Dec'].apply(formatta_hhmm)
     df_output['Standard Rif.'] = df_output['Standard_Applicato'].apply(formatta_hhmm)
-    df_output['Orario Continuato'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
+    df_output['Diritto al Pasto'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
     
     colonne_finali = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Diritto al Pasto', 'Standard Rif.', 'Straord. Giorno']
     return df_output[colonne_finali], tot_ore_file, tot_straord_file
