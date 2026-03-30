@@ -41,59 +41,57 @@ def formatta_hhmm(ore_decimali):
 def analizza_pdf(pdf_file):
     ore_standard_base = {0: 8.0, 1: 8.0, 2: 8.0, 3: 8.0, 4: 4.0, 5: 0.0, 6: 0.0}
     nomi_giorni = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+    limite_inizio_cont = converti_in_timedelta("14:00")
+    limite_fine_cont = converti_in_timedelta("15:30")
     
-    turni_estratti = []
+    dati_righe = []
     
-    # Queste variabili "ricordano" l'ultimo giorno trovato
-    giorno_in_memoria = None 
-    idx_in_memoria = None
+    # VARIABILI DI STATO: mantengono la data tra una riga e l'altra
+    giorno_corrente = None
+    giorno_sett_idx = None
 
     with pdfplumber.open(pdf_file) as pdf:
         for pagina in pdf.pages:
             testo = pagina.extract_text()
             if not testo: continue
-            linee = testo.split('\n')
             
-            for linea in linee:
-                # 1. CERCA UNA NUOVA DATA
-                match_data = re.search(r'(\d{2}\s+(?:Lun|Mar|Mer|Gio|Gia|Ven|Sab|Sah|Dom)|(\d{2}/\d{2}/\d{4}))', linea, re.IGNORECASE)
-                
+            for linea in testo.split('\n'):
+                # 1. Cerchiamo se la riga contiene una NUOVA data
+                match_data = re.search(r'(\d{2}\s+[A-Za-z]{3}|\d{2}/\d{2}/\d{4})', linea)
                 if match_data:
-                    giorno_in_memoria = match_data.group(1).strip()
-                    # Identifica il giorno della settimana per lo standard (8h o 4h)
-                    low_g = giorno_in_memoria.lower()
-                    if 'lun' in low_g: idx_in_memoria = 0
-                    elif 'mar' in low_g: idx_in_memoria = 1
-                    elif 'mer' in low_g: idx_in_memoria = 2
-                    elif 'gio' in low_g or 'gia' in low_g: idx_in_memoria = 3
-                    elif 'ven' in low_g: idx_in_memoria = 4
-                    elif 'sab' in low_g or 'sah' in low_g: idx_in_memoria = 5
-                    elif 'dom' in low_g: idx_in_memoria = 6
+                    giorno_corrente = match_data.group(1).strip()
+                    giorno_sett_idx = ricava_giorno_settimana(giorno_corrente)
+
+                # Se non abbiamo ancora trovato nessuna data, saltiamo la riga
+                if giorno_sett_idx is None:
+                    continue
+
+                # 2. Cerchiamo TUTTI gli orari nella riga (possono essere più di 2)
+                orari = re.findall(r'\b\d{2}:\d{2}\b', linea)
                 
-                # 2. SE ABBIAMO UNA DATA IN MEMORIA, CERCHIAMO GLI ORARI
-                if giorno_in_memoria:
-                    orari = re.findall(r'\b\d{2}:\d{2}\b', linea)
+                # Elaboriamo le coppie di orari (Inizio/Fine)
+                for i in range(0, len(orari) // 2 * 2, 2):
+                    ora_in, ora_fi = orari[i], orari[i+1]
                     
-                    for i in range(0, len(orari) // 2 * 2, 2):
-                        ora_in, ora_fi = orari[i], orari[i+1]
-                        if ora_in == "00:00" and ora_fi == "00:00": continue
+                    if ora_in == "00:00" and ora_fi == "00:00":
+                        continue
+                    
+                    t_in = converti_in_timedelta(ora_in)
+                    t_fi = converti_in_timedelta(ora_fi)
+                    t_fi_effettiva = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
+                    
+                    durata_ore = (t_fi_effettiva - t_in).total_seconds() / 3600
+                    is_continuato = (t_in <= limite_inizio_cont) and (t_fi_effettiva >= limite_fine_cont)
 
-                        t_in = converti_in_timedelta(ora_in)
-                        t_fi = converti_in_timedelta(ora_fi)
-                        t_fi_eff = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
-                        durata = (t_fi_eff - t_in).total_seconds() / 3600
-                        
-                        is_cont = (t_in <= timedelta(hours=14)) and (t_fi_eff >= timedelta(hours=15, minutes=30))
-
-                        turni_estratti.append({
-                            "Data": giorno_in_memoria,
-                            "Giorno_Idx": idx_in_memoria,
-                            "Giorno": nomi_giorni[idx_in_memoria] if idx_in_memoria is not None else "Sconosciuto",
-                            "Inizio": ora_in,
-                            "Fine": ora_fi,
-                            "Ore_Fatte": durata,
-                            "Is_Cont": is_cont
-                        })
+                    dati_righe.append({
+                        "Data": giorno_corrente,
+                        "Giorno": nomi_giorni[giorno_sett_idx],
+                        "Giorno_Idx": giorno_sett_idx,
+                        "Inizio": ora_in,
+                        "Fine": ora_fi,
+                        "Ore_Fatte": durata_ore,
+                        "Is_Cont": is_continuato
+                    })
     
     if not dati_righe: return pd.DataFrame(), 0, 0
     
