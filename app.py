@@ -19,7 +19,7 @@ def converti_in_timedelta(ora_str):
 
 def ricava_giorno_settimana(data_str):
     data_str = data_str.lower()
-    # Gestione typo comuni nei PDF (es. Sah invece di Sab, Gia invece di Gio)
+    # Gestione typo comuni nei PDF
     if 'lun' in data_str: return 0
     if 'mar' in data_str: return 1
     if 'mer' in data_str: return 2
@@ -82,11 +82,14 @@ def analizza_pdf(pdf_file):
                     t_fi_eff = t_fi + timedelta(hours=24) if t_fi <= t_in else t_fi
                     
                     durata = (t_fi_eff - t_in).total_seconds() / 3600
+                    
+                    # Fallback sicuro per il giorno indice
+                    idx_sicuro = giorno_sett_idx if giorno_sett_idx is not None else 0
 
                     dati_righe.append({
                         "Data": giorno_corrente,
-                        "Giorno": nomi_giorni[giorno_sett_idx],
-                        "Giorno_Idx": giorno_sett_idx,
+                        "Giorno": nomi_giorni[idx_sicuro],
+                        "Giorno_Idx": idx_sicuro,
                         "Inizio": ora_in,
                         "Fine": ora_fi,
                         "Ore_Fatte": durata,
@@ -106,14 +109,14 @@ def analizza_pdf(pdf_file):
 
     # Calcolo Standard e Straordinario
     def calcola_std(row):
-        std = ore_standard_base[row['Giorno_Idx']]
+        std = ore_standard_base.get(row['Giorno_Idx'], 0.0)
         # Se copre la fascia mensa (Lun-Gio), lo standard sale di 30 min per recupero pausa
         return (std + 0.5) if (row['Giorno_Idx'] <= 3 and row['Copre_Mensa']) else std
 
     df_daily['Standard_Rif'] = df_daily.apply(calcola_std, axis=1)
     df_daily['Straord_Dec'] = (df_daily['Ore_Fatte'] - df_daily['Standard_Rif']).clip(lower=0)
     
-    # 4. Merge correttivo (Rinominiamo le colonne per evitare il KeyError)
+    # 4. Merge correttivo 
     df_daily = df_daily.rename(columns={'Copre_Mensa': 'Giorno_Continuato', 'Ore_Fatte': 'Totale_Giorno'})
     
     df_output = df_raw.merge(
@@ -130,52 +133,11 @@ def analizza_pdf(pdf_file):
     df_output['Diritto Pasto'] = df_output['Giorno_Continuato'].map({True: 'SI', False: 'NO'})
     
     colonne = ['Data', 'Giorno', 'Inizio', 'Fine', 'Durata Turno', 'Totale Giorno', 'Standard Rif.', 'Diritto Pasto', 'Straord. Giorno']
-    return df_output[colonne], df_daily['Totale_Giorno'].sum(), df_daily['Straord_Dec'].sum()
     
-    if not dati_righe: return pd.DataFrame(), 0, 0
+    ore_totali = df_daily['Totale_Giorno'].sum()
+    straord_totali = df_daily['Straord_Dec'].sum()
     
-    df_raw = pd.DataFrame(dati_righe)
-    
-    # 3. RAGGRUPPAMENTO PER GIORNO
-    # Sommiamo tutte le ore fatte nello stesso giorno e verifichiamo il continuato totale
-    df_daily = df_raw.groupby('Data_Originale').agg({
-        'Ore_Fatte': 'sum',
-        'Giorno_Idx': 'first',
-        'Giorno': 'first',
-        'Segmento_Cont': 'any'
-    }).reset_index()
-
-    def calcola_standard(row):
-        # Orario base
-        base = ore_standard_base[row['Giorno_Idx']]
-        # Se ha fatto continuato (Segmento_Cont è True) e non è venerdì/sabato/domenica, aggiungi 30min
-        if row['Giorno_Idx'] <= 3 and row['Segmento_Cont']:
-            return base + 0.5
-        return base
-
-    df_daily['Standard_Rif'] = df_daily.apply(calcola_standard, axis=1)
-    df_daily['Straordinario_Dec'] = (df_daily['Ore_Fatte'] - df_daily['Standard_Rif']).clip(lower=0)
-    
-    # Prepara DataFrame per output leggibile
-    df_output = df_raw.merge(
-        df_daily[['Data_Originale', 'Standard_Rif', 'Straordinario_Dec', 'Segmento_Cont', 'Ore_Fatte']], 
-        on='Data_Originale', 
-        how='left'
-    )
-    
-    # Formattazione per visualizzazione
-    df_output['Durata Turno'] = df_output['Ore_Fatte_x'].apply(formatta_hhmm)
-    df_output['Totale Giorno'] = df_output['Ore_Fatte_y'].apply(formatta_hhmm)
-    df_output['Straord. Giorno'] = df_output['Straordinario_Dec'].apply(formatta_hhmm)
-    df_output['Standard Applicato'] = df_output['Standard_Rif'].apply(formatta_hhmm)
-    df_output['Cont.'] = df_output['Segmento_Cont'].map({True: 'SI', False: 'NO'})
-    
-    colonne_finali = [
-        'Data_Originale', 'Giorno', 'Inizio', 'Fine', 
-        'Durata Turno', 'Totale Giorno', 'Standard Applicato', 'Cont.', 'Straord. Giorno'
-    ]
-    
-    return df_output[colonne_finali], df_daily['Ore_Fatte'].sum(), df_daily['Straordinario_Dec'].sum()
+    return df_output[colonne], ore_totali, straord_totali
 
 # --- INTERFACCIA STREAMLIT ---
 uploaded_files = st.file_uploader("Carica i PDF Perseo3", type="pdf", accept_multiple_files=True)
@@ -188,34 +150,56 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         df_mese, ore_f, straord_f = analizza_pdf(uploaded_file)
         if not df_mese.empty:
-            # Pulizia nome file per il foglio Excel
             nome_sheet = re.sub(r'[^\w\s]', '', uploaded_file.name)[:30]
-            fogli_da_salvare.append((nome_sheet, df_mese))
+            # Salvo anche i dati del singolo file per il foglio riepilogativo
+            fogli_da_salvare.append((nome_sheet, df_mese, ore_f, straord_f))
+            
             totale_gen_ore += ore_f
             totale_gen_straord += straord_f
 
+            # Mostra risultati per il singolo file
+            with st.expander(f"📄 Dettaglio File: {uploaded_file.name}", expanded=False):
+                c1, c2 = st.columns(2)
+                c1.metric("Ore Lavorate (Singolo File)", formatta_hhmm(ore_f))
+                c2.metric("Straordinario (Singolo File)", formatta_hhmm(straord_f))
+                st.dataframe(df_mese, use_container_width=True)
+
     if fogli_da_salvare:
         st.divider()
-        c1, c2 = st.columns(2)
-        c1.metric("Totale Ore Lavorate", formatta_hhmm(totale_gen_ore))
-        c2.metric("Totale Straordinario", formatta_hhmm(totale_gen_straord))
+        st.subheader("📊 Totale Complessivo (Tutti i file)")
         
+        # Mostra i totali generali in basso
+        c_tot1, c_tot2 = st.columns(2)
+        c_tot1.metric("TOTALE GENERALE ORE", formatta_hhmm(totale_gen_ore))
+        c_tot2.metric("TOTALE GENERALE STRAORDINARI", formatta_hhmm(totale_gen_straord))
+        
+        # Preparazione del file Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for nome, df in fogli_da_salvare:
-                df.to_excel(writer, sheet_name=nome, index=False)
-                with st.expander(f"Dettaglio: {nome}"):
-                    st.dataframe(df, use_container_width=True)
+            dati_riepilogo = []
             
+            for nome, df, ore_f, straord_f in fogli_da_salvare:
+                df.to_excel(writer, sheet_name=nome, index=False)
+                # Popolo le righe del riepilogo per il file corrente
+                dati_riepilogo.append({
+                    "Nome File": nome,
+                    "Ore Lavorate": formatta_hhmm(ore_f),
+                    "Straordinario": formatta_hhmm(straord_f)
+                })
+            
+            # Aggiungo la riga del gran totale al riepilogo Excel
+            dati_riepilogo.append({
+                "Nome File": "TOTALE GENERALE",
+                "Ore Lavorate": formatta_hhmm(totale_gen_ore),
+                "Straordinario": formatta_hhmm(totale_gen_straord)
+            })
+
             # Foglio Riepilogo
-            pd.DataFrame({
-                "Descrizione": ["Totale Ore", "Totale Straordinario"],
-                "HH:MM": [formatta_hhmm(totale_gen_ore), formatta_hhmm(totale_gen_straord)]
-            }).to_excel(writer, sheet_name="RIEPILOGO", index=False)
+            pd.DataFrame(dati_riepilogo).to_excel(writer, sheet_name="RIEPILOGO", index=False)
 
         st.download_button(
-            label="📥 Scarica Report Excel",
+            label="📥 Scarica Report Excel Completo",
             data=output.getvalue(),
-            file_name=f"Report_Lavoro_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            file_name=f"Report_Lavoro_Multiplo_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
